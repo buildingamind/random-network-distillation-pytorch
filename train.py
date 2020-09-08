@@ -8,8 +8,14 @@ from tensorboardX import SummaryWriter
 
 import numpy as np
 
+from command import chickAI_arg_parser
+from chickAI_env import make_chickAI_gym_env
+
 
 def main():
+    argparser = chickAI_arg_parser()
+    args = argparser.parse_args()
+
     print({section: dict(config[section]) for section in config.sections()})
     train_method = default_config['TrainMethod']
     env_id = default_config['EnvID']
@@ -19,6 +25,8 @@ def main():
         env = BinarySpaceToDiscreteSpaceEnv(gym_super_mario_bros.make(env_id), COMPLEX_MOVEMENT)
     elif env_type == 'atari':
         env = gym.make(env_id)
+    elif env_type == 'chickAI':
+        env = make_chickAI_gym_env(args)
     else:
         raise NotImplementedError
     input_size = env.observation_space.shape  # 4
@@ -29,8 +37,8 @@ def main():
 
     env.close()
 
-    is_load_model = True
-    is_render = False
+    is_load_model = False
+    is_render = True
     model_path = 'models/{}.model'.format(env_id)
     predictor_path = 'models/{}.pred'.format(env_id)
     target_path = 'models/{}.target'.format(env_id)
@@ -73,6 +81,8 @@ def main():
         env_type = AtariEnvironment
     elif default_config['EnvType'] == 'mario':
         env_type = MarioEnvironment
+    elif default_config['EnvType'] == 'chickAI':
+        env_type = ChickAIEnvironment
     else:
         raise NotImplementedError
 
@@ -111,14 +121,32 @@ def main():
     child_conns = []
     for idx in range(num_worker):
         parent_conn, child_conn = Pipe()
-        work = env_type(env_id, is_render, idx, child_conn, sticky_action=sticky_action, p=action_prob,
-                        life_done=life_done)
+        if default_config['EnvType'] == 'chickAI':
+            work = env_type(
+                    args,
+                    is_render,
+                    idx,
+                    child_conn,
+                    history_size=int(default_config['HistorySize']),
+                    sticky_action=sticky_action,
+                    p=action_prob,
+                    life_done=life_done)
+        else:
+            work = env_type(
+                    env_id,
+                    is_render,
+                    idx,
+                    child_conn,
+                    sticky_action=sticky_action,
+                    p=action_prob,
+                    life_done=life_done)
+
         work.start()
         works.append(work)
         parent_conns.append(parent_conn)
         child_conns.append(child_conn)
 
-    states = np.zeros([num_worker, 4, 84, 84])
+    states = np.zeros([num_worker, int(default_config['HistorySize']), 84, 84])
 
     sample_episode = 0
     sample_rall = 0
@@ -139,7 +167,7 @@ def main():
 
         for parent_conn in parent_conns:
             s, r, d, rd, lr = parent_conn.recv()
-            next_obs.append(s[3, :, :].reshape([1, 84, 84]))
+            next_obs.append(s[-1, :, :].reshape([1, 84, 84]))
 
         if len(next_obs) % (num_step * num_worker) == 0:
             next_obs = np.stack(next_obs)
@@ -168,7 +196,7 @@ def main():
                 dones.append(d)
                 real_dones.append(rd)
                 log_rewards.append(lr)
-                next_obs.append(s[3, :, :].reshape([1, 84, 84]))
+                next_obs.append(s[-1, :, :].reshape([1, 84, 84]))
 
             next_states = np.stack(next_states)
             rewards = np.hstack(rewards)

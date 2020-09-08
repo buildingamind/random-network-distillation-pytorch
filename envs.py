@@ -8,7 +8,7 @@ from collections import deque
 from copy import copy
 
 import gym_super_mario_bros
-from nes_py.wrappers import BinarySpaceToDiscreteSpaceEnv
+#from nes_py.wrappers import BinarySpaceToDiscreteSpaceEnv
 from gym_super_mario_bros.actions import SIMPLE_MOVEMENT, COMPLEX_MOVEMENT
 
 from torch.multiprocessing import Pipe, Process
@@ -16,6 +16,8 @@ from torch.multiprocessing import Pipe, Process
 from model import *
 from config import *
 from PIL import Image
+
+from chickAI_env import make_chickAI_gym_env
 
 train_method = default_config['TrainMethod']
 max_step_per_episode = int(default_config['MaxStepPerEpisode'])
@@ -109,6 +111,102 @@ class MontezumaInfoWrapper(gym.Wrapper):
 
     def reset(self):
         return self.env.reset()
+
+class ChickAIEnvironment(Environment):
+    def __init__(
+            self,
+            env_args,
+            is_render,
+            env_idx,
+            child_conn,
+            history_size=4,
+            h=84,
+            w=84,
+            life_done=True,
+            sticky_action=True,
+            p=0.25):
+        super().__init__()
+        self.daemon = True
+        self.env = make_chickAI_gym_env(env_args)
+        self.is_render = is_render
+        self.env_idx = env_idx
+        self.steps = 0
+        self.episode = 0
+        self.rall = 0
+        self.recent_rlist = deque(maxlen=100)
+        self.child_conn = child_conn
+
+        self.sticky_action = sticky_action
+        self.last_action = 0
+        self.p = p
+
+        self.history_size = history_size
+        self.history = np.zeros([history_size, h, w])
+        self.h = h
+        self.w = w
+
+        self.reset()
+
+    def run(self):
+        super().run()
+        while True:
+            action = self.child_conn.recv()
+
+            # sticky action
+            if self.sticky_action:
+                if np.random.rand() <= self.p:
+                    action = self.last_action
+                self.last_action = action
+
+            s, reward, done, info = self.env.step(action)
+
+            if max_step_per_episode < self.steps:
+                done = True
+
+            log_reward = reward
+            force_done = done
+
+            self.history[:-1, :, :] = self.history[1:, :, :]
+            self.history[-1, :, :] = self.pre_proc(s)
+
+            self.rall += reward
+            self.steps += 1
+
+            if done:
+                self.recent_rlist.append(self.rall)
+                print(
+                    "[Episode {}({})] Step: {}  Reward: {}  Recent Reward: {}".format(
+                        self.episode,
+                        self.env_idx,
+                        self.steps,
+                        self.rall,
+                        np.mean(self.recent_rlist)))
+
+                self.history = self.reset()
+
+            self.child_conn.send(
+                [self.history[:, :, :], reward, force_done, done, log_reward])
+
+    def reset(self):
+        self.last_action = 0
+        self.steps = 0
+        self.episode += 1
+        self.rall = 0
+        s = self.env.reset()
+        self.get_init_state(
+            self.pre_proc(s))
+        return self.history[:, :, :]
+
+    def pre_proc(self, X):
+        X = np.array(Image.fromarray(X).convert('L')).astype('float32')
+        x = cv2.resize(X, (self.h, self.w))
+        return x
+
+    def get_init_state(self, s):
+        for i in range(self.history_size):
+            self.history[i, :, :] = self.pre_proc(s)
+
+
 
 
 class AtariEnvironment(Environment):
